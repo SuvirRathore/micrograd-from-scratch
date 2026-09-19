@@ -1,141 +1,127 @@
 # micrograd-from-scratch
 
-Building of reverse-mode automatic differentiation engines from scratch in Python, as a
-structured self-study project.
-The emphasis throughout is on deriving and implementing the machinery myself rather than using 
-framework autograd.
+**Reverse-mode automatic differentiation, neural networks, and optimisation implemented in Python.**
 
-Starts from Karpathy's [micrograd](https://karpathy.ai/zero-to-hero.html) with a layer of self-directed experiments on top investigating:
+I built this project to understand how neural-network training works beneath a framework: specifically how a computation becomes a graph, how gradients flow through it, and how those gradients update the model. Starting from Andrej Karpathy's [micrograd lesson](https://karpathy.ai/zero-to-hero.html), I extended the scalar implementation with a NumPy-backed tensor engine, numerical gradient checks, optimisation experiments, and learnable activation functions.
 
-(i) varying
-activations for layers; tanh, linear, RELU, sigmoid as well as a mix and learnable blend of them,
+## Overview
 
-(ii) different optimisers for gradient descent; SGD, AdaGrad, RMSProp, Adam.
+- **Two autodiff engines:** a scalar engine with explicit computation graphs, and a tensor engine with manually implemented backward rules for broadcasting, reductions and 2-D matrix multiplication. Neither uses framework autograd.
+- **Numerical verification:** central finite-difference checkers for scalar and tensor parameters. The included tensor checks produce maximum absolute errors of approximately $2\times10^{-9}$ on their tested inputs.
+- **Optimisation from first principles:** handwritten SGD and adaptive updates, including RMSProp and Adam variants, with bias correction implemented in the random-restart script.
+- **Independent experiments:** trainable tanh/ReLU mixtures for individual neurons; activation comparisons, learning trajectories, and 15 random restarts on XOR.
+- **Performance investigation:** measured scalar training cost as network size grows and investigated recursion failures caused by deep computation graphs, motivating the tensor implementation.
 
-The experiments performed and the results of changing the above are given below.
+The extensions beyond the introductory scalar implementation are the tensor engine, numerical verification, adaptive optimisation experiments, learnable activation blends, and performance investigation.
 
-## The Neural Network
-### Scalar Engine
+## What I Built
 
-- `engine.py`: a `Value` class implementing reverse-mode automatic differentiation;
-  arithmetic operations with backward closures, topological-sort, and
-  gradient accumulation.
-- `nn.py`: `Neuron`/`Layer`/`MLP` built on the engine, with configurable activations
-  including a learnable per-neuron tanh/ReLU blend (continuous relaxation of a discrete
-  architecture choice, trained by gradient descent).
-- Optimiser implemented from first principles: SGD, AdaGrad, RMSProp, Adam with
-  bias correction - each motivated by the failure mode of the previous.
-- `num_grad.py`: central-difference gradient checker; all operations verified to ~1e-9.
+| Component | Implementation | What it makes explicit                                                                                                                                                    |
+| --- | --- |---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Scalar autodiff | [`engine.py`](engine.py) | Each operation records its inputs and backward rule. Reverse topological traversal propagates gradients; shared inputs accumulate contributions from every path.          |
+| Neural-network layers | [`nn.py`](nn.py) | Neurons, layers and MLPs compose the scalar operations. Hidden layers support tanh, ReLU, linear, or learned blended activations.                                         |
+| Tensor autodiff | [`tensor/tensor.py`](tensor/tensor.py) | NumPy handles array arithmetic; the engine implements differentiation itself, including summing gradients over broadcast axes and backward rules for 2-D matrix products. |
+| Vectorised layers | [`tensor/nn_tensor.py`](tensor/nn_tensor.py) | A layer's linear transformation becomes one matrix-multiplication node, followed by bias addition and activation, instead of many scalar graph nodes.                     |
+| Numerical checks | [`num_grad.py`](num_grad.py), [`tensor/num_grad_tensor.py`](tensor/num_grad_tensor.py) | Compare backpropagated derivatives with independently computed central finite differences.                                                                                |
 
-### Tensor Engine
+NumPy supplies tensor storage and numerical operations; matplotlib supplies plots. Graphviz is used for computation-graph visualisation.
 
-- `tensor`: this folder contains versions of the engine and neural network adapted to tensor framework using pytorch, and includes a comparison to the scalar versions.
-- `tensor/tensor.py`: a NumPy-backed autograd engine; broadcasting with correct
-  backward (sum over broadcast axes via a two-step unbroadcast), matmul backward as
-  vector-Jacobian products, reductions.
-- `tensor/nn_tensor.py`: vectorised MLP; each layer is one matmul node rather than a
-  graph of scalar operations.
+## Experiments and Findings
 
-### Training Loop and Data
+### Can neurons learn their own activation mixture?
 
-- `demo.py`: training loop of the neural network, including the data, optimisers and fixed seed, with plots.
-- `demo_random_restart.py`: like demo, but with multiple starting seeds for random restarts experiment.
+I extended each hidden neuron with an activation $f(z)=\alpha\tanh(z)+(1-\alpha)\operatorname{ReLU}(z)$, where $\alpha=\operatorname{sigmoid}(a)$ and $a$ is trained alongside the weights and bias. Each blended neuron therefore has one additional trainable parameter. Values of $\alpha$ near 1 favour tanh; values near 0 favour ReLU.
 
+I compared pure activations, a fixed tanh/ReLU choice across layers, and learned mixtures on the four-point XOR problem, using squared-error training loss.
 
-## Miscellaneous
+![XOR training losses for linear, tanh, ReLU, fixed mixed and learned blended activations](figs/XOR_5way.png)
 
-- `num_grad.py`: manually calculates loss to compare with loss.backward()
-- `time_scaling.py`: measures how per-iteration training cost grows with network size on the scalar engine. It loops over architectures MLP(3, [w, w, 1]) for w in {4, 16, 32, 64, 128}, and for each one times five full training iterations (forward pass over the 4-example dataset, zero_grad, backward, SGD update), averages them, and prints the parameter count alongside the time.
-- `visualise`, `visualise_demo`: visualisation of backward pass using graphs
+**Observation:** in the illustrated run, the fixed mix and learned blend reached lower training loss than the pure activations. The blend learned different coefficients across neurons.
 
-## Experiments and Analysis
+**Interpretation:** this demonstrates that activation coefficients can be trained through the same autodiff engine. It does not establish a reliable performance advantage: these are small training-set experiments, the blend adds parameters, and resetting the same random seed does not give the blend identical starting weights because its extra parameters consume additional random draws.
 
-The loss-landscape example is XOR (except for initial linear data), on which the folliowing is performed; activation comparisons, multi-seed distributions of the
-learned activation blend, per-neuron training trajectories, random restarts. 
+### How sensitive are the results to initialisation?
 
-Then there is a quantitative stress test of the scalar engine - time scaling linear in parameters, the
-recursion-depth wall induced by Python's `sum()` building linear graph chains, and a
-measured ~10^4x scalar-vs-vectorised gap on identical computations, motivating the
-tensor design empirically.
+Changing the seed weakened an apparent advantage of the mixed architecture. I then examined the blended network across 15 random restarts, recording training losses and the final coefficients of its eight hidden neurons.
 
-## Results
+![Training losses across 15 random restarts and pooled activation coefficients from 120 neurons](figs/rrestart_pooled_alpha.png)
 
-### Activation Architecture
+**Observation:** final losses vary substantially across initialisations. The pooled activation coefficients are spread across both sides of the midpoint, with fewer near an equal mixture in this sample.
 
-![Toy regression](figs/toy_lin_wins.png)
+**Interpretation:** one successful run is insufficient to establish a robust advantage. These restarts characterise the blended model; establishing superiority over tanh or ReLU would require corresponding baseline runs. The 120 neuron coefficients are descriptive observations from 15 networks, not 120 independent experimental replications. The experiments investigate optimisation on XOR, rather than generalisation to unseen data.
 
-On the four-point toy regression set, the purely linear network converges fastest. The
-target is close to linear, so nonlinearity is not effective and only slows optimisation - the simplest model winning
-shows the importance of the shape of the data in the architecture of the model.
+### What changes when the optimiser changes?
 
-![XOR three-way](figs/XOR_three_way.png)
+The experiments explore SGD, accumulated squared-gradient scaling (AdaGrad), exponentially averaged squared-gradient scaling (RMSProp), and Adam-style first and second moments. Their purpose is to investigate stalling, oscillation and sensitivity to activation choice.
 
-XOR is not linearly separable, so the linear network plateaus at chance. ReLU descends
-faster early while tanh is smoother later; a per-layer mix of the two beats both pure
-variants throughout, capturing each one's advantage in the regime where it holds.
+The current code retains SGD, RMSProp and an uncorrected Adam-style update in [`demo.py`](demo.py). AdaGrad's accumulator update remains as a commented alternative inside the RMSProp routine. [`demo_random_restart.py`](demo_random_restart.py) contains both uncorrected and bias-corrected Adam variants: the restart distribution uses the former, while the neuron-trajectory plot uses the latter.
 
-### Optimisers
+These plots are exploratory examples under particular settings, rather than a general ranking of optimisers or an isolated test of momentum's causal effect.
 
-![Stalling](figs/rms_stalls_mix.png)
+### Why build a tensor engine?
 
-AdaGrad's accumulating denominator drives the effective learning rate
-monotonically toward zero and training stalls on every architecture except the mixed
-one, which retains enough gradient signal to keep descending.
+The scalar engine constructs Python objects and backward closures for individual arithmetic operations. In the measured small-network examples, iteration time grew approximately with parameter count; for dense layers of similar width, parameter count grows roughly quadratically with width.
 
-![Seed sensitivity](figs/ada_seed43.png)
+The investigation also exposed a separate limit: Python's `sum()` builds a long chain of addition nodes, which can exceed the recursion limit during the engine's recursive graph traversal.
 
-Repeating the comparison on a different seed with everything else held fixed, the mixed
-architecture no longer holds a clear advantage, and moving from AdaGrad to
-RMSProp changes little. The apparent advantage above is seed-dependent: the honest
-reading is that mixing helps sometimes rather than reliably, which is why the population
-analyses below use multiple seeds rather than one.
+These observations motivated representing whole array operations as graph nodes. The tensor engine retains explicit differentiation rules while moving numerical array work into NumPy.
 
-![Adam vs adaptive-only](figs/adam_v_adagrad_blends.png)
+**Benchmark status:** `time_scaling.py` includes a scalar/tensor timing comparison, but its tensor branch uses a 1-D vector input. The current matrix-multiplication backward rule supports 2-D operands and gives incorrect weight gradients for that benchmark input. The earlier approximately $10^4$ speedup claim is therefore withheld pending a corrected benchmark and gradient-equivalence check. The tensor training demo uses 2-D column inputs.
 
-Adding momentum on the gradient itself damps the oscillation. The
-adaptive-without-momentum variants swing over orders of magnitude while the Adam
-variants descend smoothly, with the effect most pronounced on the mixed architecture.
+<details>
+<summary>Additional experiment plots</summary>
 
-### Learned per-neuron blending
+These figures record exploratory runs. Their settings were edited during development; the default scripts do not regenerate every historical figure in one command.
 
-![Alpha trajectories](figs/neuron_trajectory.png)
+**Toy regression and activation comparisons**
 
-Each neuron carries a learnable blend parameter between tanh and ReLU, trained by
-gradient descent alongside the weights, to test whether neurons specialise or converge on
-a shared activation. Trajectories start bunched near the midpoint, fan out, cross, and
-freeze as the loss bottoms out - specialisation emerges during training rather than being
-fixed at initialisation.
+![Training on the four-point toy regression dataset](figs/toy_lin_wins.png)
 
-![Restarts and pooled alphas](figs/rrestart_pooled_alpha.png)
+![XOR activation comparison](figs/XOR_three_way.png)
 
-Left image: final loss across 15 random restarts, most converging to ~1e-9 with one seed stuck
-several orders of magnitude higher, which is why single-seed results are not evidence.
+**Adaptive updates and seed sensitivity**
 
-Right image: pooling converged blend parameters across 120 neurons gives a roughly bimodal
-distribution with a slight ReLU lean and the midpoint least populated. Given the freedom,
-neurons commit toward one activation rather than averaging them.
+![Training curves illustrating stalling under the recorded settings](figs/rms_stalls_mix.png)
 
-![XOR five-way](figs/XOR_5way.png)
+![Activation comparison under a different seed](figs/ada_seed43.png)
 
-Both the fixed per-layer mix and the learned per-neuron blend reach ~1e-5 while the pure
-activations plateau three to four orders of magnitude higher. The learned blend matches
-the hand-specified mix without being told which activation to use where.
+![Recorded comparison of Adam-style and adaptive-only updates](figs/adam_v_adagrad_blends.png)
 
+**Learned activation trajectories**
 
-### Timing
-The forward pass creates roughly 2P objects, since each parameter contributes a multiply and an add, which is why operation count tracks parameter count and time tracks both.
+![Individual neuron activation coefficients during bias-corrected Adam training](figs/neuron_trajectory.png)
 
-Linear in parameters and quadratic in width are the same fact on different axes. A dense layer of width w fed by width w has w² weights, so P is quadratic in w. Confirmed in the data: width 16 to 32 doubled the width, took params from 353 to 1217 (about 3.5×), and time from 3.4 to 11.5 ms (about 3.4×).
+</details>
 
-The constant kills it rather than the growth rate; at 17k parameters it is roughly a quarter of a second per iteration. Extrapolating linearly, 1M parameters gives roughly 14 s/iter, so hours for a single training run, and anything at 100M+ is out of reach.
+## Run the code
 
-## Running it
+From the repository root, create an environment and install dependencies:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python demo.py
 ```
 
+Run the scalar activation demo or the random-restart experiment:
 
-All code is my own implementation; external libraries are limited to NumPy and matplotlib.
+```bash
+python demo.py
+python demo_random_restart.py
+```
+
+Run the tensor checks and training demo:
+
+```bash
+python tensor/test_tensor.py
+python tensor/grad_comparison_tensor.py
+python tensor/demo_tensor.py
+```
+
+The tensor checks cover selected arithmetic and activation cases, broadcast shapes, reductions, and square/non-square 2-D matrix products. They are examples of numerical verification, not exhaustive coverage of all operations and shapes. Some comparisons print an `OK`/`FAIL` status rather than raising an assertion.
+
+For further inspection, [`time_scaling.py`](time_scaling.py) contains the scaling and recursion experiments, and [`visualise.py`](visualise.py) / [`visualise_demo.py`](visualise_demo.py) contain graph visualisation code. Rendering graphs also requires the Graphviz system executable.
+
+## Scope
+
+This is an implementation and experimentation project built around small, inspectable examples. The scalar foundation follows Karpathy's micrograd lesson; the extensions explore verification, optimisation, activation learning and the move from scalar to tensor computation. The current tensor engine supports a deliberately limited operation set, with scalar-loss backpropagation and 2-D matrix-multiplication backward rules.
